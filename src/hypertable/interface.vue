@@ -1,6 +1,6 @@
 <!-- Source: https://github.com/directus/directus/blob/main/app/src/interfaces/datetime/datetime.vue -->
 <script setup lang="ts">
-import { format as localizedFormat } from 'date-fns';
+import { format as localizedFormat } from 'date-fns';  // Originally imported from unavailable directus/app
 import { isValid, parse, parseISO } from 'date-fns';
 import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';

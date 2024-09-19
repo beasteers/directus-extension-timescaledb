@@ -8,6 +8,7 @@ const reconcileHypertable = async (meta, context: EventContext) => {
 	const { event, collection, payload } = meta;
 	const { field: fieldName, meta: fieldMeta } = payload;
 	console.log('meta', event, collection, payload);
+	console.log('schema', schema?.collections[collection]);
 
 	/* -------------------- Was the field a hypertable field? ------------------- */
 
@@ -19,7 +20,7 @@ const reconcileHypertable = async (meta, context: EventContext) => {
 			.select('*').from('directus_fields')
 			.where('collection', collection)
 			.where('field', fieldName)
-			.where('interface', 'tsdb-hypertable')
+			.where('interface', 'tsdb-hypertable')  // TODO: FieldsService?
 	) || [];
 	if(!field) {
 		return;
@@ -45,33 +46,25 @@ const reconcileHypertable = async (meta, context: EventContext) => {
 		}
 
 		/* -------------- Make sure we are ready to create a hypertable ------------- */
-		// Collection must have a non-composite primary key
-		// Collection time field must be non-null
-		// Unique constraints must include time column: https://docs.timescale.com/use-timescale/latest/hypertables/hypertables-and-unique-indexes/
-
-		// make sure the time field is required
-		if(!field.required) {
-			// FIXME: can we force/hide this in the interface?
-			console.log('Converting field to be required', collection, field.field);
-			await database.schema.alterTable(collection, async (t) => {
-				await t.dropNullable(field.field);
-			});
-			await database('directus_fields').update({ required: true }).where('id', field.id);
-		}
+		// Must meet the following requirements:
+		//  - Collection must have a non-composite primary key
+		//  - Collection time field must be non-null
+		//  - Unique constraints must include time column: https://docs.timescale.com/use-timescale/latest/hypertables/hypertables-and-unique-indexes/
 
 		// Get the current primary key
-		const [primaryKey] = (await database.raw(`
+		// 		Source: https://github.com/directus/directus/blob/46611e67512279127216ddeec99a810cfb450dce/packages/schema/src/dialects/postgres.ts#L129
+		const [primaryKey] = (await database.raw(
+			`
 			SELECT kcu.column_name, tc.constraint_name
 			FROM information_schema.table_constraints AS tc
 			JOIN information_schema.key_column_usage AS kcu
 				ON tc.constraint_name = kcu.constraint_name
 				AND tc.table_schema = kcu.table_schema
 				AND tc.table_name = kcu.table_name
-			WHERE tc.table_name = ? AND tc.table_schema = ? AND tc.constraint_type = 'PRIMARY KEY'`, 
-			[collection, schemaName])).rows;
+			WHERE tc.table_name = ? AND tc.table_schema = ? AND tc.constraint_type = 'PRIMARY KEY'
+			`,
+		[collection, schemaName])).rows;
 		console.log('Primary key', primaryKey);
-		// Where primary key is queried: 
-		// 	  https://github.com/directus/directus/blob/46611e67512279127216ddeec99a810cfb450dce/packages/schema/src/dialects/postgres.ts#L129
 
 		// Drop any existing primary key and add the time field as the primary key instead
 		await database.schema.alterTable(collection, async (t) => {
@@ -79,15 +72,25 @@ const reconcileHypertable = async (meta, context: EventContext) => {
 				console.log('Dropping primary key', primaryKey.constraint_name);
 				await t.dropPrimary(primaryKey.constraint_name);
 			}
-
+		});
+		await database.schema.alterTable(collection, async (t) => {
 			// Error that shows up if we don't set a primary key: 
 			//   Collection "${collection}" doesn't have a primary key column and will be ignored
 			//   https://github.com/directus/directus/blob/46611e67512279127216ddeec99a810cfb450dce/api/src/utils/get-schema.ts#L137
 			// Error if any constraint does not include the partitioning field (time):
 			//   ERROR:  cannot create a unique index without the column "time" (used in partitioning)
 			console.log('Updating primary key to include time partitioning key', primaryKey.column_name, field.field);
-			await t.primary(field.field);
+			t.primary(field.field);
+			// make sure the time field is required
+			if(!field.required) {
+				t.dropNullable(field.field);
+			}
 		});
+		// make sure the time field is required (updated below too)
+		if(!field.required) {
+			// FIXME: can we force/hide this in the interface?
+			await database('directus_fields').update({ required: true }).where('id', field.id);
+		}
 
 		// Check if there are any unique indexes on this table
 		const uniqueIndexes = (await database.raw(`
@@ -117,23 +120,14 @@ const reconcileHypertable = async (meta, context: EventContext) => {
 
 		// https://docs.timescale.com/api/latest/hypertable/create_hypertable/
 		console.log('Creating hypertable', collection, field.field, meta);
-		const result = await database.raw(`
+		const result = (await database.raw(`
 			SELECT * from create_hypertable(?, by_range(?), if_not_exists => TRUE, migrate_data => TRUE)`, 
-		[collection, field.field]);
+		[collection, field.field])).rows;
 		console.log('Result', result);
-
-		// await database.schema.alterTable(collection, async (t) => {
-		// 	if(primaryKey) {
-		// 		console.log('Updating primary key', primaryKey.column_name);
-		// 		await t.primary(primaryKey.constraint_name);
-		// 	}
-		// });
 	}
 }
 
 export default defineHook(({ action }) => {	
-
-
 	action('fields.create', async (meta, context) => {
 		console.log('action', meta);
 		try {

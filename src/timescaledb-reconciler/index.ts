@@ -1,8 +1,9 @@
 import type { EventContext } from '@directus/types';
 import { defineHook } from '@directus/extensions-sdk';
+import { Knex } from 'knex';
 
 
-const reconcileHypertable = async (meta, context: EventContext) => {
+const reconcileHypertable = async (meta: any, context: EventContext) => {
 	const schemaName = 'public';  // FIXME
 	const { database, schema } = context;
 	const { event, collection, payload } = meta;
@@ -45,76 +46,7 @@ const reconcileHypertable = async (meta, context: EventContext) => {
 			return;
 		}
 
-		/* -------------- Make sure we are ready to create a hypertable ------------- */
-		// Must meet the following requirements:
-		//  - Collection must have a non-composite primary key
-		//  - Collection time field must be non-null
-		//  - Unique constraints must include time column: https://docs.timescale.com/use-timescale/latest/hypertables/hypertables-and-unique-indexes/
-
-		// Get the current primary key
-		// 		Source: https://github.com/directus/directus/blob/46611e67512279127216ddeec99a810cfb450dce/packages/schema/src/dialects/postgres.ts#L129
-		const [primaryKey] = (await database.raw(
-			`
-			SELECT kcu.column_name, tc.constraint_name
-			FROM information_schema.table_constraints AS tc
-			JOIN information_schema.key_column_usage AS kcu
-				ON tc.constraint_name = kcu.constraint_name
-				AND tc.table_schema = kcu.table_schema
-				AND tc.table_name = kcu.table_name
-			WHERE tc.table_name = ? AND tc.table_schema = ? AND tc.constraint_type = 'PRIMARY KEY'
-			`,
-		[collection, schemaName])).rows;
-		console.log('Primary key', primaryKey);
-
-		// Drop any existing primary key and add the time field as the primary key instead
-		await database.schema.alterTable(collection, async (t) => {
-			if(primaryKey) {
-				console.log('Dropping primary key', primaryKey.constraint_name);
-				await t.dropPrimary(primaryKey.constraint_name);
-			}
-		});
-		await database.schema.alterTable(collection, async (t) => {
-			// Error that shows up if we don't set a primary key: 
-			//   Collection "${collection}" doesn't have a primary key column and will be ignored
-			//   https://github.com/directus/directus/blob/46611e67512279127216ddeec99a810cfb450dce/api/src/utils/get-schema.ts#L137
-			// Error if any constraint does not include the partitioning field (time):
-			//   ERROR:  cannot create a unique index without the column "time" (used in partitioning)
-			console.log('Updating primary key to include time partitioning key', primaryKey.column_name, field.field);
-			t.primary(field.field);
-			// make sure the time field is required
-			if(!field.required) {
-				t.dropNullable(field.field);
-			}
-		});
-		// make sure the time field is required (updated below too)
-		if(!field.required) {
-			// FIXME: can we force/hide this in the interface?
-			await database('directus_fields').update({ required: true }).where('id', field.id);
-		}
-
-		// Check if there are any unique indexes on this table
-		const uniqueIndexes = (await database.raw(`
-			SELECT i.relname as name, json_agg(a.attname) AS cols
-			FROM pg_class t, pg_class i, pg_index ix, pg_attribute a
-			WHERE t.oid = ix.indrelid AND i.oid = ix.indexrelid AND a.attrelid = t.oid
-				AND a.attnum = ANY(ix.indkey) AND t.relkind = 'r' AND t.relname = ?
-				AND ix.indisunique = true AND t.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = ?)
-			GROUP BY i.relname`, [collection, schemaName])).rows;
-		// find ones that don't include the partitioning field
-		const incompatibleIndexes = uniqueIndexes.filter((row) => !row.cols.includes(field.field));
-
-		console.log('Unique indexes', uniqueIndexes);
-		console.log('Incompatible indexes', incompatibleIndexes);
-
-		// Drop unique indexes that don't include the partitioning field
-		if(incompatibleIndexes.length) {
-			await database.schema.alterTable(collection, async (t) => {
-				for(const index of incompatibleIndexes) {
-					console.log('Dropping unique index', collection, index);
-					await t.dropUnique(index.cols, index.name);
-				}
-			})
-		}
+		prepareTableForHypertable(schemaName, collection, field, database);
 
 		/* --------------------------- Create the hypertable ------------------------- */
 
@@ -126,6 +58,87 @@ const reconcileHypertable = async (meta, context: EventContext) => {
 		console.log('Result', result);
 	}
 }
+
+
+
+const prepareTableForHypertable = async (schemaName: string, collection: string, field: any, database: Knex) => {
+		
+		/* -------------------------------------------------------------------------- */
+		/*                                Ugly Details                                */
+		/* -------------------------------------------------------------------------- */
+		
+	/* -------------- Make sure we are ready to create a hypertable ------------- */
+	// Must meet the following requirements:
+	//  - Collection must have a non-composite primary key
+	//  - Collection time field must be non-null
+	//  - Unique constraints must include time column: https://docs.timescale.com/use-timescale/latest/hypertables/hypertables-and-unique-indexes/
+
+	// Get the current primary key
+	// 		Source: https://github.com/directus/directus/blob/46611e67512279127216ddeec99a810cfb450dce/packages/schema/src/dialects/postgres.ts#L129
+	const [primaryKey] = (await database.raw(
+		`
+		SELECT kcu.column_name, tc.constraint_name
+		FROM information_schema.table_constraints AS tc
+		JOIN information_schema.key_column_usage AS kcu
+			ON tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+			AND tc.table_name = kcu.table_name
+		WHERE tc.table_name = ? AND tc.table_schema = ? AND tc.constraint_type = 'PRIMARY KEY'
+		`,
+	[collection, schemaName])).rows;
+	console.log('Primary key', primaryKey);
+
+	// Drop any existing primary key and add the time field as the primary key instead
+	await database.schema.alterTable(collection, async (t) => {
+		if(primaryKey) {
+			console.log('Dropping primary key', primaryKey.constraint_name);
+			await t.dropPrimary(primaryKey.constraint_name);
+		}
+	});
+	await database.schema.alterTable(collection, async (t) => {
+		// Error that shows up if we don't set a primary key: 
+		//   Collection "${collection}" doesn't have a primary key column and will be ignored
+		//   https://github.com/directus/directus/blob/46611e67512279127216ddeec99a810cfb450dce/api/src/utils/get-schema.ts#L137
+		// Error if any constraint does not include the partitioning field (time):
+		//   ERROR:  cannot create a unique index without the column "time" (used in partitioning)
+		console.log('Updating primary key to include time partitioning key', primaryKey.column_name, field.field);
+		t.primary(field.field);
+		// make sure the time field is required
+		if(!field.required) {
+			t.dropNullable(field.field);
+		}
+	});
+	// make sure the time field is required (updated below too)
+	if(!field.required) {
+		// FIXME: can we force/hide this in the interface?
+		await database('directus_fields').update({ required: true }).where('id', field.id);
+	}
+
+	// Check if there are any unique indexes on this table
+	const uniqueIndexes = (await database.raw(`
+		SELECT i.relname as name, json_agg(a.attname) AS cols
+		FROM pg_class t, pg_class i, pg_index ix, pg_attribute a
+		WHERE t.oid = ix.indrelid AND i.oid = ix.indexrelid AND a.attrelid = t.oid
+			AND a.attnum = ANY(ix.indkey) AND t.relkind = 'r' AND t.relname = ?
+			AND ix.indisunique = true AND t.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = ?)
+		GROUP BY i.relname`, [collection, schemaName])).rows;
+	// find ones that don't include the partitioning field
+	const incompatibleIndexes = uniqueIndexes.filter((row) => !row.cols.includes(field.field));
+
+	console.log('Unique indexes', uniqueIndexes);
+	console.log('Incompatible indexes', incompatibleIndexes);
+
+	// Drop unique indexes that don't include the partitioning field
+	if(incompatibleIndexes.length) {
+		await database.schema.alterTable(collection, async (t) => {
+			for(const index of incompatibleIndexes) {
+				console.log('Dropping unique index', collection, index);
+				await t.dropUnique(index.cols, index.name);
+			}
+		})
+	}
+}
+
 
 export default defineHook(({ action }) => {	
 	action('fields.create', async (meta, context) => {

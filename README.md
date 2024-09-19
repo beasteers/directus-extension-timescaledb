@@ -47,11 +47,21 @@ Current Logic:
 
 ### Primary Keys
 
-TimescaleDB [does not support primary keys](https://docs.timescale.com/use-timescale/latest/hypertables/hypertables-and-unique-indexes/).
+PostgresQL does not support primary keys [that do not contain your table partitioning key (e.g. time)](https://docs.timescale.com/use-timescale/latest/hypertables/hypertables-and-unique-indexes/).
 
 So we try to see if we can just drop the unique constraint of the primary key before creating the table.
 
 After converting to hypertable, we get [this error](https://github.com/directus/directus/blob/46611e67512279127216ddeec99a810cfb450dce/api/src/utils/get-schema.ts#L137).
+
+Therefore we are forced into `PRIMARY KEY(time)` for the time being.
+
+Ideally, we would not have to touch primary keys.
+
+### Unique Indexes
+
+Similar to above, you also cannot have unique indexes that do not contain the partitioning key so we have to drop those as well.
+
+Not ideal, and I wonder if this could cause Directus to malfunction.
 
 ### Can we make nullable be non-configurable?
 
@@ -60,5 +70,4 @@ Sometimes when editing the field, it will give this error.
 ```
 ERROR:  cannot drop not-null constraint from a time-partitioned column
 ```
-
-### What makes it disappear
+I think it's possible that the directus configuration fell out of sync with the actual table schema due to an error, so this may just be a case of enforcing the non-nullable field in a better way.

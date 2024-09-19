@@ -1,0 +1,31 @@
+version: "3.7"
+
+services:
+  directus:
+    image: directus/directus
+    ports:
+     - 8059:8055
+    volumes:
+      - .:/directus/extensions/directus-extension-timescaledb
+    environment:
+      KEY: asdf
+      SECRET: asdf
+      ADMIN_EMAIL: admin@admin.com
+      ADMIN_PASSWORD: admin
+      PUBLIC_URL: "http://localhost:8055"
+      EXTENSIONS_AUTO_RELOAD: "1"
+      DB_CLIENT: pg
+      DB_HOST: timescale
+      DB_PORT: '5432'
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE: postgres
+
+  timescale:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+    volumes:
+      - ./data:/var/lib/postgresql/data
+    restart: always
